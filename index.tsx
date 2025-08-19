@@ -2,6 +2,8 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
+import React, { useState, useEffect, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
 
 interface Instrument {
     id: string;
@@ -64,7 +66,7 @@ IF Enable THEN
     ELSE
         Fault := FALSE;
         (* Scaling logic *)
-        Scale_Factor := (Max_EU - Min_EU) / REAL_TO_INT(Max_Raw - Min_Raw);
+        Scale_Factor := (Max_EU - Min_EU) / INT_TO_REAL(Max_Raw - Min_Raw);
         Process_Value := (INT_TO_REAL(Raw_Input - Min_Raw) * Scale_Factor) + Min_EU;
 
         (* Alarm logic *)
@@ -135,7 +137,7 @@ IF Enable THEN
         HH_Alarm := FALSE; H_Alarm := FALSE; L_Alarm := FALSE; LL_Alarm := FALSE;
     ELSE
         Fault := FALSE;
-        Scale_Factor := (Max_EU - Min_EU) / REAL_TO_INT(Max_Raw - Min_Raw);
+        Scale_Factor := (Max_EU - Min_EU) / INT_TO_REAL(Max_Raw - Min_Raw);
         Process_Value := (INT_TO_REAL(Raw_Input - Min_Raw) * Scale_Factor) + Min_EU;
         HH_Alarm := Process_Value > HH_Alarm_SP;
         H_Alarm := Process_Value > H_Alarm_SP;
@@ -530,7 +532,7 @@ IF Enable THEN
     Fault := FALSE;
     Delta_Pulses := Pulse_Input - Last_Pulses;
     IF Time_Base_Sec > 0.0 AND Pulses_Per_Revolution > 0 THEN
-        Speed_RPM := (DINT_TO_REAL(Delta_Pulses) / Pulses_Per_Revolution) / Time_Base_Sec * 60.0;
+        Speed_RPM := (DINT_TO_REAL(Delta_Pulses) / REAL_TO_INT(Pulses_Per_Revolution)) / Time_Base_Sec * 60.0;
     ELSE
         Speed_RPM := 0.0;
         Fault := TRUE;
@@ -1279,26 +1281,18 @@ Measuring water, gas, or steam consumption for billing, controlling the amount o
         controllerLogic: `(* PLC Standard Code - Structured Text (ST) for Flow Totalizer *)
 FUNCTION_BLOCK FB_FlowTotalizer
 VAR_INPUT
-    Flow_Rate : REAL; (* In units per second, e.g., m³/s *)
+    Flow_Rate : REAL; (* In units per hour, e.g., m³/h *)
+    Cycle_Time_Sec : REAL; (* PLC scan time in seconds *)
     Reset_Cmd : BOOL;
     Enable : BOOL := TRUE;
 END_VAR
 VAR_OUTPUT
     Total_Flow : LREAL; (* Use LREAL for large accumulated values *)
 END_VAR
-VAR
-    Cycle_Time_Sec : REAL;
-    Last_Time : DINT;
-    Current_Time : DINT;
-END_VAR
 
 IF Enable THEN
-    (* This is a simplified totalizer. A real implementation should use system clock for accuracy. *)
-    (* Assuming this FB is called in a fixed-time task, e.g., every 100ms *)
-    Cycle_Time_Sec := 0.1; (* Example: 100ms scan time *)
-    Total_Flow := Total_Flow + (Flow_Rate * Cycle_Time_Sec);
-ELSE
-    (* Hold value *)
+    (* Add the volume that passed during the last scan cycle *)
+    Total_Flow := Total_Flow + (Flow_Rate * Cycle_Time_Sec / 3600.0);
 END_IF;
 
 IF Reset_Cmd THEN
@@ -1349,4 +1343,719 @@ COMMENT "Variable 'Effluent_pH' (REAL) is mapped to the HMI for display as AI-60
         code: 'TC',
         name: 'Temperature Controller',
         description: 'Compares the temperature with a setpoint and adjusts an output.',
-        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">T</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">C</text></svg>',
+        detailsContent: `### Temperature Controller (TC)
+A Temperature Controller is the "brain" of a temperature control loop. Its function is to:
+1. Receive the temperature measurement from a transmitter (TT) or a sensor (TE).
+2. Compare this measurement with a desired value (Setpoint).
+3. Calculate a control action (using an algorithm like PID) to minimize the error.
+4. Send an output signal to an actuator (like a steam control valve) to adjust the process.
+
+### Location
+It can be an individual panel device or a software function within a PLC or DCS.`,
+        controllerLogic: `(* PLC Standard Code - Structured Text (ST) for a PID Controller *)
+(* This is a simplified PID block. Real implementations are more complex. *)
+FUNCTION_BLOCK FB_PID_Controller
+VAR_INPUT
+    Enable: BOOL;
+    AutoMode: BOOL;
+    ProcessValue: REAL;
+    Setpoint: REAL;
+    ManualOutput: REAL; (* 0-100% *)
+    Gain: REAL := 1.0;
+    IntegralTime_s: REAL := 10.0;
+    DerivativeTime_s: REAL := 0.0;
+END_VAR
+VAR_OUTPUT
+    Output: REAL; (* 0-100% *)
+END_VAR
+VAR
+    Error: REAL;
+    LastError: REAL := 0.0;
+    IntegralTerm: REAL := 0.0;
+    DerivativeTerm: REAL;
+    CycleTime_s : REAL; (* Assume fixed scan time *)
+END_VAR
+
+CycleTime_s := 0.1; (* Example: 100ms *)
+
+IF Enable THEN
+    IF AutoMode THEN
+        Error := Setpoint - ProcessValue;
+
+        (* Proportional Term *)
+        Output := Error * Gain;
+
+        (* Integral Term *)
+        IntegralTerm := IntegralTerm + (Error * Gain * CycleTime_s / IntegralTime_s);
+        IF IntegralTerm > 100.0 THEN IntegralTerm := 100.0; END_IF;
+        IF IntegralTerm < 0.0 THEN IntegralTerm := 0.0; END_IF;
+        Output := Output + IntegralTerm;
+
+        (* Derivative Term *)
+        DerivativeTerm := (Error - LastError) * Gain * DerivativeTime_s / CycleTime_s;
+        Output := Output + DerivativeTerm;
+
+        LastError := Error;
+    ELSE
+        (* Manual Mode *)
+        Output := ManualOutput;
+        IntegralTerm := ManualOutput; (* Anti-reset windup *)
+    END_IF;
+ELSE
+    Output := 0.0; (* Fail safe *)
+END_IF;
+
+END_FUNCTION_BLOCK`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="25" text-anchor="middle" font-size="12" fill="#ccc">TEMPERATURE CTRL</text>
+    <text x="125" y="40" text-anchor="middle" font-size="10" fill="#888">TC-101</text>
+    
+    <!-- PV -->
+    <text x="50" y="60" text-anchor="middle" font-size="10" fill="#ccc">PV</text>
+    <text x="50" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#03a9f4">150.2</text>
+    <text x="50" y="105" text-anchor="middle" font-size="10" fill="#888">°C</text>
+
+    <!-- SP -->
+    <text x="125" y="60" text-anchor="middle" font-size="10" fill="#ccc">SP</text>
+    <text x="125" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#4caf50">150.0</text>
+    <text x="125" y="105" text-anchor="middle" font-size="10" fill="#888">°C</text>
+
+    <!-- OUT -->
+    <text x="200" y="60" text-anchor="middle" font-size="10" fill="#ccc">OUT</text>
+    <text x="200" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#ff9800">55.8</text>
+    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+</svg>`
+    },
+    {
+        id: 'PC',
+        category: 'controller-indicator',
+        code: 'PC',
+        name: 'Pressure Controller',
+        description: 'Compares pressure with a setpoint and adjusts an output.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">P</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">C</text></svg>',
+        detailsContent: `### Pressure Controller (PC)
+A Pressure Controller performs the same function as a TC, but for the pressure variable. It compares the measured pressure (from a PT) with a setpoint and manipulates an actuator (like a valve or a pump's speed) to maintain the pressure at the desired value.
+
+### Operating Principle
+It uses a control algorithm (usually PID) to calculate the necessary output to correct any deviation of the pressure from the setpoint.
+
+### Common Applications
+Maintaining constant pressure in a reactor, controlling the pressure in a gas or steam line.`,
+        controllerLogic: `(* A Pressure Controller (PC) uses the same fundamental logic as a Temperature Controller (TC). *)
+(* It is an instance of a generic PID Function Block. *)
+(* See the logic example for the Temperature Controller (TC). *)
+
+COMMENT "PC-201 is an instance of FB_PID_Controller where the ProcessValue is from PT-201 and the Output goes to PV-201.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="25" text-anchor="middle" font-size="12" fill="#ccc">PRESSURE CTRL</text>
+    <text x="125" y="40" text-anchor="middle" font-size="10" fill="#888">PC-201</text>
+    
+    <text x="50" y="60" text-anchor="middle" font-size="10" fill="#ccc">PV</text>
+    <text x="50" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#03a9f4">8.52</text>
+    <text x="50" y="105" text-anchor="middle" font-size="10" fill="#888">bar</text>
+
+    <text x="125" y="60" text-anchor="middle" font-size="10" fill="#ccc">SP</text>
+    <text x="125" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#4caf50">8.50</text>
+    <text x="125" y="105" text-anchor="middle" font-size="10" fill="#888">bar</text>
+
+    <text x="200" y="60" text-anchor="middle" font-size="10" fill="#ccc">OUT</text>
+    <text x="200" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#ff9800">40.0</text>
+    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+</svg>`
+    },
+    {
+        id: 'LC',
+        category: 'controller-indicator',
+        code: 'LC',
+        name: 'Level Controller',
+        description: 'Compares level with a setpoint and adjusts an output.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">L</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">C</text></svg>',
+        detailsContent: `### Level Controller (LC)
+A Level Controller automates the filling or emptying of a tank to maintain the level at a specific setpoint. It receives the signal from a Level Transmitter (LT) and sends a signal to an inlet valve or an outlet pump.
+
+### Control Types
+It can be modulating control (using a control valve to continuously adjust the inlet/outlet flow) or on-off control (starting/stopping a pump between two level points).
+
+### Common Applications
+Preventing overflow or emptying of process tanks, maintaining a constant level in a separator.`,
+        controllerLogic: `(* A Level Controller (LC) uses the same fundamental logic as a Temperature Controller (TC). *)
+(* It is an instance of a generic PID Function Block. *)
+(* Note: Level control can sometimes be 'reverse acting' (e.g., open valve to lower level). This is handled by PID tuning or configuration. *)
+(* See the logic example for the Temperature Controller (TC). *)
+
+COMMENT "LC-501 is an instance of FB_PID_Controller where the ProcessValue is from LT-501 and the Output goes to the inlet valve FV-501.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="25" text-anchor="middle" font-size="12" fill="#ccc">LEVEL CTRL</text>
+    <text x="125" y="40" text-anchor="middle" font-size="10" fill="#888">LC-501</text>
+    
+    <text x="50" y="60" text-anchor="middle" font-size="10" fill="#ccc">PV</text>
+    <text x="50" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#03a9f4">50.5</text>
+    <text x="50" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+
+    <text x="125" y="60" text-anchor="middle" font-size="10" fill="#ccc">SP</text>
+    <text x="125" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#4caf50">50.0</text>
+    <text x="125" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+
+    <text x="200" y="60" text-anchor="middle" font-size="10" fill="#ccc">OUT</text>
+    <text x="200" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#ff9800">65.0</text>
+    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+</svg>`
+    },
+    {
+        id: 'FC',
+        category: 'controller-indicator',
+        code: 'FC',
+        name: 'Flow Controller',
+        description: 'Compares flow with a setpoint and adjusts an output.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">F</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">C</text></svg>',
+        detailsContent: `### Flow Controller (FC)
+A Flow Controller maintains the flow rate of a fluid through a pipe at a setpoint value. It receives the measurement from a Flow Transmitter (FT) and adjusts a Flow Valve (FV) to regulate the fluid's passage.
+
+### Importance
+Flow control loops are very common and are often "slave" loops in more complex control strategies, such as cascade control.
+
+### Common Applications
+Precise dosing of reagents, controlling the feed flow to a process, and mixing different fluid streams.`,
+        controllerLogic: `(* A Flow Controller (FC) uses the same fundamental logic as a Temperature Controller (TC). *)
+(* It is an instance of a generic PID Function Block. Flow loops are typically fast-acting. *)
+(* See the logic example for the Temperature Controller (TC). *)
+
+COMMENT "FC-301 is an instance of FB_PID_Controller where the ProcessValue is from FT-301 and the Output goes to FV-301.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="25" text-anchor="middle" font-size="12" fill="#ccc">FLOW CTRL</text>
+    <text x="125" y="40" text-anchor="middle" font-size="10" fill="#888">FC-301</text>
+    
+    <text x="50" y="60" text-anchor="middle" font-size="10" fill="#ccc">PV</text>
+    <text x="50" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#03a9f4">250.1</text>
+    <text x="50" y="105" text-anchor="middle" font-size="10" fill="#888">m³/h</text>
+
+    <text x="125" y="60" text-anchor="middle" font-size="10" fill="#ccc">SP</text>
+    <text x="125" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#4caf50">250.0</text>
+    <text x="125" y="105" text-anchor="middle" font-size="10" fill="#888">m³/h</text>
+
+    <text x="200" y="60" text-anchor="middle" font-size="10" fill="#ccc">OUT</text>
+    <text x="200" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#ff9800">72.3</text>
+    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+</svg>`
+    },
+    {
+        id: 'PIC',
+        category: 'controller-indicator',
+        code: 'PIC',
+        name: 'Pressure Indicating Controller',
+        description: 'Device that indicates, transmits, and controls pressure.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">P</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">IC</text></svg>',
+        detailsContent: `### Pressure Indicating Controller (PIC)
+A Pressure Indicating Controller combines the functions of three devices in one:
+- **Indicator (I):** Displays the current pressure value.
+- **Controller (C):** Compares the pressure with a setpoint and generates an output signal.
+- The 'Transmitter' function is implied, as it must measure the variable to control it.
+
+They are very common panel-mounted devices that allow the operator to see the variable, see the setpoint, and change the controller's mode (Auto/Manual) from a single location. Equivalents exist for temperature (TIC), level (LIC), and flow (FIC).`,
+        controllerLogic: `(* A PIC (or TIC, LIC, FIC) is the most complete representation of a control loop. *)
+(* It combines the functionality of a transmitter and a controller. *)
+(* In a PLC, this would be represented by linking the Transmitter FB to the PID FB. *)
+
+VAR
+    myPT : FB_PressureTransmitter;
+    myPID : FB_PID_Controller;
+    myValve : FB_AnalogValve;
+END_VAR
+
+(* In the main program cycle: *)
+myPT(Raw_Input := AI_Card_Ch1);
+myPID(ProcessValue := myPT.Process_Value, ...);
+myValve(Control_Output := myPID.Output);
+AO_Card_Ch1 := myValve.Analog_Output;
+`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="25" text-anchor="middle" font-size="12" fill="#ccc">HEADER PRESSURE</text>
+    <text x="125" y="40" text-anchor="middle" font-size="10" fill="#888">PIC-210</text>
+    
+    <text x="50" y="60" text-anchor="middle" font-size="10" fill="#ccc">PV</text>
+    <text x="50" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#03a9f4">9.8</text>
+    <text x="50" y="105" text-anchor="middle" font-size="10" fill="#888">bar</text>
+
+    <text x="125" y="60" text-anchor="middle" font-size="10" fill="#ccc">SP</text>
+    <text x="125" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#4caf50">10.0</text>
+    <text x="125" y="105" text-anchor="middle" font-size="10" fill="#888">bar</text>
+
+    <text x="200" y="60" text-anchor="middle" font-size="10" fill="#ccc">OUT</text>
+    <text x="200" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#ff9800">80.5</text>
+    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+</svg>`
+    },
+    {
+        id: 'TR',
+        category: 'controller-indicator',
+        code: 'TR',
+        name: 'Temperature Recorder',
+        description: 'Stores the historical data of a temperature measurement.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">T</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">R</text></svg>',
+        detailsContent: `### Temperature Recorder (TR)
+A Temperature Recorder is an instrument that stores the history of one or more temperature measurements over time. The 'R' stands for 'Recorder'.
+
+### Operating Principle
+- **Traditional:** A paper recorder that uses a pen to draw a graph of the temperature on a circular or strip chart that rotates at a constant speed.
+- **Modern:** A paperless recorder that displays trends on an LCD screen and stores the data in internal memory or on an SD card. In a DCS/SCADA system, this is a software function known as historical trending.
+
+### Common Applications
+Processes that require a documented record for quality or safety regulations, such as in the food (pasteurization) and pharmaceutical industries. It is also used for troubleshooting and process optimization.`,
+        controllerLogic: `(* A Temperature Recorder (TR) is a data logging function, not a control function. *)
+(* In a modern DCS/SCADA system, any variable can be configured for 'history collection'. *)
+(* The PLC's role is simply to provide the variable to be logged. *)
+
+COMMENT "The variable 'Pasteurizer_Temp' (from TT-401) is configured in the SCADA historian for logging as TR-401.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="20" text-anchor="middle" font-size="12" fill="#ccc">PASTEURIZER TEMP TREND (TR-401)</text>
+    <!-- Trend Line -->
+    <polyline points="20,100 40,90 60,85 80,88 100,82 120,70 140,65 160,75 180,80 200,78 220,70" fill="none" stroke="#03a9f4" stroke-width="2"/>
+    <!-- Axis -->
+    <line x1="20" y1="30" x2="20" y2="100" stroke="#888" stroke-width="1"/>
+    <line x1="20" y1="100" x2="230" y2="100" stroke="#888" stroke-width="1"/>
+    <text x="15" y="35" text-anchor="end" font-size="8" fill="#888">80°C</text>
+    <text x="15" y="100" text-anchor="end" font-size="8" fill="#888">60°C</text>
+</svg>`
+    },
+    {
+        id: 'SC',
+        category: 'controller-indicator',
+        code: 'SC',
+        name: 'Speed Controller',
+        description: 'Compares speed with a setpoint and adjusts an output.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">S</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">C</text></svg>',
+        detailsContent: `### Speed Controller (SC)
+A Speed Controller maintains the rotational speed (RPM) of a piece of equipment at a desired setpoint value. It is analogous to other controllers, but its process variable is speed.
+
+### Function
+It receives the measurement from a Speed Transmitter (ST), compares it with the setpoint, and adjusts an output to correct any deviation. This output typically manipulates a Variable Frequency Drive (VFD), which in turn adjusts the motor's speed.
+
+### Common Applications
+Precise speed control of conveyor belts, screw feeders, mixers, and extruders to ensure product quality and process consistency.`,
+        controllerLogic: `(* A Speed Controller (SC) is another instance of a standard PID controller. *)
+(* See the logic example for the Temperature Controller (TC). *)
+
+COMMENT "SC-101 is an instance of FB_PID_Controller. Its ProcessValue comes from ST-101 and its Output is sent to a Variable Frequency Drive (VFD).";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 120" width="250" height="120" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="5" y="5" width="240" height="110" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="125" y="25" text-anchor="middle" font-size="12" fill="#ccc">CONVEYOR SPEED CTRL</text>
+    <text x="125" y="40" text-anchor="middle" font-size="10" fill="#888">SC-101</text>
+    
+    <text x="50" y="60" text-anchor="middle" font-size="10" fill="#ccc">PV</text>
+    <text x="50" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#03a9f4">1498</text>
+    <text x="50" y="105" text-anchor="middle" font-size="10" fill="#888">RPM</text>
+
+    <text x="125" y="60" text-anchor="middle" font-size="10" fill="#ccc">SP</text>
+    <text x="125" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#4caf50">1500</text>
+    <text x="125" y="105" text-anchor="middle" font-size="10" fill="#888">RPM</text>
+
+    <text x="200" y="60" text-anchor="middle" font-size="10" fill="#ccc">OUT</text>
+    <text x="200" y="85" text-anchor="middle" font-size="20" font-weight="bold" fill="#ff9800">90.2</text>
+    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#888">%</text>
+</svg>`
+    },
+    {
+        id: 'TSH',
+        category: 'controller-indicator',
+        code: 'TSH',
+        name: 'High Temperature Switch',
+        description: 'Discrete device that trips on high temperature.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">T</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">SH</text></svg>',
+        detailsContent: `### High Temperature Switch (TSH)
+A High Temperature Switch is a protection device. Unlike a transmitter, it does not measure the analog value of the temperature, but simply changes the state of an electrical contact (from open to closed or vice versa) when the temperature exceeds a predefined setpoint.
+
+### Function
+The 'H' stands for 'High'. It acts when the temperature is too high. A TSL would act on low temperature.
+
+### Common Applications
+Activating an audible or visual alarm, or triggering an emergency shutdown of a piece of equipment to prevent overheating and damage.`,
+        controllerLogic: `(* PLC Standard Code - Structured Text (ST) for a Switch *)
+FUNCTION_BLOCK FB_DiscreteSwitch
+VAR_INPUT
+    Switch_Input : BOOL; (* Digital input from the switch *)
+    Alarm_Delay : TIME := T#2S; (* Debounce timer *)
+END_VAR
+VAR_OUTPUT
+    Alarm_Active : BOOL;
+END_VAR
+VAR
+    On_Delay_Timer : TON;
+END_VAR
+
+(* A timer is often used to prevent nuisance alarms from flickering inputs *)
+On_Delay_Timer(IN := Switch_Input, PT := Alarm_Delay);
+Alarm_Active := On_Delay_Timer.Q;
+
+END_FUNCTION_BLOCK`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#f44336" stroke="#c62828" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" font-size="12" fill="#fff">BEARING TEMP HIGH</text>
+    <text x="100" y="70" text-anchor="middle" font-size="28" font-weight="bold" fill="#fff">TRIPPED</text>
+    <text x="20" y="80" text-anchor="start" font-size="10" fill="#ffcdd2">TSH-101B</text>
+</svg>`
+    },
+    {
+        id: 'LSL',
+        category: 'controller-indicator',
+        code: 'LSL',
+        name: 'Low Level Switch',
+        description: 'Discrete device that trips on low level.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">L</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">SL</text></svg>',
+        detailsContent: `### Low Level Switch (LSL)
+A Low Level Switch is a protection device that changes the state of an electrical contact when the level of a liquid or solid in a tank drops below a critical setpoint.
+
+### Function
+The 'L' stands for 'Low'. It acts when the level is too low. An LSH would act on high level.
+
+### Common Applications
+Protecting a pump from running dry (which would damage it), activating a low raw material alarm, or initiating an automatic filling sequence.`,
+        controllerLogic: `(* A Level Switch (LSL/LSH) uses the same logic as any other discrete switch. *)
+(* It is an instance of a generic switch monitoring Function Block. *)
+(* See the logic example for the High Temperature Switch (TSH). *)
+
+COMMENT "LSL-501 is an instance of FB_DiscreteSwitch that receives its input from the level switch DI.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" font-size="12" fill="#ccc">PUMP SUCTION LEVEL</text>
+    <text x="100" y="70" text-anchor="middle" font-size="28" font-weight="bold" fill="#4caf50">NORMAL</text>
+    <text x="20" y="80" text-anchor="start" font-size="10" fill="#888">LSL-101</text>
+</svg>`
+    },
+    {
+        id: 'PSH',
+        category: 'controller-indicator',
+        code: 'PSH',
+        name: 'High Pressure Switch',
+        description: 'Discrete device that trips on high pressure.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">P</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">SH</text></svg>',
+        detailsContent: `### High Pressure Switch (PSH)
+A High Pressure Switch is a protection device that changes the state of an electrical contact when the system pressure exceeds a predefined setpoint.
+
+### Function
+It does not provide a continuous measurement, only a discrete (on/off) indication that a high-pressure condition has been reached. It is used to activate safety interlocks or alarms.
+
+### Common Applications
+Shutting down a pump to prevent over-pressurization of a pipe, activating a high-pressure alarm, or opening an emergency vent valve. The 'H' indicates it acts on 'High'.`,
+        controllerLogic: `(* A Pressure Switch (PSH/PSL) uses the same logic as any other discrete switch. *)
+(* It is an instance of a generic switch monitoring Function Block. *)
+(* See the logic example for the High Temperature Switch (TSH). *)
+
+COMMENT "PSH-205 is an instance of FB_DiscreteSwitch that receives its input from the pressure switch DI.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#f44336" stroke="#c62828" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" font-size="12" fill="#fff">PUMP DISCHARGE PRESS HIGH</text>
+    <text x="100" y="70" text-anchor="middle" font-size="28" font-weight="bold" fill="#fff">TRIPPED</text>
+    <text x="20" y="80" text-anchor="start" font-size="10" fill="#ffcdd2">PSH-205</text>
+</svg>`
+    },
+    {
+        id: 'PSL',
+        category: 'controller-indicator',
+        code: 'PSL',
+        name: 'Low Pressure Switch',
+        description: 'Discrete device that trips on low pressure.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">P</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">SL</text></svg>',
+        detailsContent: `### Low Pressure Switch (PSL)
+A Low Pressure Switch is the complement to the PSH. It is a protection device that changes the state of its contact when the system pressure drops below a critical setpoint.
+
+### Function
+It provides a discrete (on/off) signal to indicate a low-pressure condition, which can often be dangerous or detrimental to the equipment.
+
+### Common Applications
+Protecting a pump by ensuring there is sufficient suction pressure (NPSH), detecting a leak in a system, or ensuring that the pressure of a sealing gas is maintained above a minimum. The 'L' indicates it acts on 'Low'.`,
+        controllerLogic: `(* A Pressure Switch (PSH/PSL) uses the same logic as any other discrete switch. *)
+(* It is an instance of a generic switch monitoring Function Block. *)
+(* See the logic example for the High Temperature Switch (TSH). *)
+
+COMMENT "PSL-204 is an instance of FB_DiscreteSwitch that receives its input from the pressure switch DI.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" font-size="12" fill="#ccc">PUMP SUCTION PRESS LOW</text>
+    <text x="100" y="70" text-anchor="middle" font-size="28" font-weight="bold" fill="#4caf50">NORMAL</text>
+    <text x="20" y="80" text-anchor="start" font-size="10" fill="#888">PSL-204</text>
+</svg>`
+    },
+    {
+        id: 'FSH',
+        category: 'controller-indicator',
+        code: 'FSH',
+        name: 'High Flow Switch',
+        description: 'Discrete device that trips on high flow.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">F</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">SH</text></svg>',
+        detailsContent: `### High Flow Switch (FSH)
+A High Flow Switch is a device that activates when the flow rate of a fluid in a pipe exceeds a predetermined value.
+
+### Operating Principle
+It can be a paddle that is pushed by the flow, or it can be based on thermal dispersion. It does not measure the exact flow value, but simply detects if the flow is higher than its setpoint.
+
+### Common Applications
+Activating an alarm if the coolant flow is excessive, or as part of a safety system to detect a possible pipe rupture downstream.`,
+        controllerLogic: `(* A Flow Switch (FSH/FSL) uses the same logic as any other discrete switch. *)
+(* It is an instance of a generic switch monitoring Function Block. *)
+(* See the logic example for the High Temperature Switch (TSH). *)
+
+COMMENT "FSH-711 is an instance of FB_DiscreteSwitch that receives its input from the flow switch DI.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#444" stroke="#555" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" font-size="12" fill="#ccc">COOLING WATER FLOW HIGH</text>
+    <text x="100" y="70" text-anchor="middle" font-size="28" font-weight="bold" fill="#4caf50">OK</text>
+    <text x="20" y="80" text-anchor="start" font-size="10" fill="#888">FSH-711</text>
+</svg>`
+    },
+    {
+        id: 'SSH',
+        category: 'controller-indicator',
+        code: 'SSH',
+        name: 'High Speed Switch',
+        description: 'Discrete device that trips on high rotational speed.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">S</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">SH</text></svg>',
+        detailsContent: `### High Speed Switch (SSH)
+A High Speed Switch is a protection device for rotating machinery. It changes the state of its contact when the equipment's RPM exceeds a safety limit.
+
+### Function
+Its main purpose is to protect against overspeed conditions that could cause a catastrophic failure of the equipment.
+
+### Common Applications
+It is a critical safety element in steam or gas turbines and large motors. Its activation usually triggers an immediate emergency shutdown of the equipment.`,
+        controllerLogic: `(* A Speed Switch (SSH/SSL) uses the same logic as any other discrete switch. *)
+(* It is an instance of a generic switch monitoring Function Block. *)
+(* See the logic example for the High Temperature Switch (TSH). *)
+
+COMMENT "SSH-101A is an instance of FB_DiscreteSwitch that receives its input from the overspeed switch DI. It should trigger a safety interlock.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+    <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#f44336" stroke="#c62828" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" font-size="12" fill="#fff">MOTOR OVERSPEED</text>
+    <text x="100" y="70" text-anchor="middle" font-size="28" font-weight="bold" fill="#fff">TRIPPED</text>
+    <text x="20" y="80" text-anchor="start" font-size="10" fill="#ffcdd2">SSH-101A</text>
+</svg>`
+    },
+    {
+        id: 'TAH',
+        category: 'controller-indicator',
+        code: 'TAH',
+        name: 'High Temperature Alarm',
+        description: 'Software alarm triggered by high temperature.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">T</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">AH</text></svg>',
+        detailsContent: `### High Temperature Alarm (TAH)
+A High Temperature Alarm is a function, usually implemented in the control system's software (PLC/DCS), that notifies the operator when a temperature measurement exceeds a predefined threshold.
+
+### Function
+Unlike a switch (TSH), which is a field device, an alarm (TAH) is a logical function that takes the signal from a transmitter (TT). Its purpose is to alert the operator via the graphical interface (HMI) with a message, a color change, or a sound, allowing them to take corrective action before an emergency shutdown level is reached.
+
+### Common Applications
+In virtually any process where temperature is a critical variable, to warn of overheating in reactors, motor bearings, furnaces, etc.`,
+        controllerLogic: `(* A software alarm is a comparison function. *)
+FUNCTION_BLOCK FB_AnalogAlarm
+VAR_INPUT
+    Process_Value : REAL;
+    High_SP : REAL;
+    Low_SP : REAL;
+END_VAR
+VAR_OUTPUT
+    High_Alarm : BOOL;
+    Low_Alarm : BOOL;
+END_VAR
+
+High_Alarm := Process_Value > High_SP;
+Low_Alarm := Process_Value < Low_SP;
+
+END_FUNCTION_BLOCK`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+  <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#ff9800" stroke="#f57c00" stroke-width="2"/>
+  <text x="100" y="30" text-anchor="middle" font-size="12" fill="#000">REACTOR TEMP HIGH ALARM</text>
+  <text x="100" y="65" text-anchor="middle" font-size="28" font-weight="bold" fill="#000">130.5 °C</text>
+  <text x="20" y="80" text-anchor="start" font-size="10" fill="#424242">TAH-105</text>
+</svg>`
+    },
+    {
+        id: 'LAL',
+        category: 'controller-indicator',
+        code: 'LAL',
+        name: 'Low Level Alarm',
+        description: 'Software alarm triggered by low level.',
+        icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5"/><text x="12" y="9" text-anchor="middle" dominant-baseline="middle" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor">L</text><text x="12" y="16" text-anchor="middle" dominant-baseline="middle" font-size="6" font-family="sans-serif" font-weight="bold" fill="currentColor">AL</text></svg>',
+        detailsContent: `### Low Level Alarm (LAL)
+A Low Level Alarm is a logical function within the control system that alerts the operator when the level in a tank or vessel drops below a warning threshold.
+
+### Function
+Like the TAH, the LAL takes its value from a continuous transmitter (LT) and generates a notification on the HMI. It allows the operator to intervene before the level drops to a critical point that could trigger a low-level switch (LSL) and stop a pump.
+
+### Common Applications
+Warning about the need to replenish raw material in a day tank, notifying of a possible emptying of a storage tank, or indicating problems with filling a vessel.`,
+        controllerLogic: `(* A software alarm is a comparison function. *)
+(* See the logic example for the High Temperature Alarm (TAH). *)
+
+COMMENT "LAL-501 is an instance of FB_AnalogAlarm where Process_Value is from LT-501.";`,
+        hmiRepresentation: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100" style="background-color:#333; color:#fff; font-family:sans-serif;">
+  <rect x="10" y="10" width="180" height="80" rx="5" ry="5" fill="#ff9800" stroke="#f57c00" stroke-width="2"/>
+  <text x="100" y="30" text-anchor="middle" font-size="12" fill="#000">TANK LEVEL LOW ALARM</text>
+  <text x="100" y="65" text-anchor="middle" font-size="28" font-weight="bold" fill="#000">14.8 %</text>
+  <text x="20" y="80" text-anchor="start" font-size="10" fill="#424242">LAL-501</text>
+</svg>`
+    }
+];
+
+// --- REACT APPLICATION ---
+
+type ViewMode = 'list' | 'grid';
+type FilterType = 'all' | Instrument['category'];
+type ModalTab = 'description' | 'controller' | 'hmi';
+
+// Simple markdown parser for ### headers and paragraphs
+const parseDetailsContent = (content: string) => {
+    return content.split('\n').map((line, index) => {
+        line = line.trim();
+        if (line.startsWith('###')) {
+            return <h3 key={index}>{line.replace('###', '').trim()}</h3>;
+        }
+        if (line) {
+            return <p key={index}>{line}</p>;
+        }
+        return null;
+    });
+};
+
+const App = () => {
+    const [filter, setFilter] = useState<FilterType>('all');
+    const [view, setView] = useState<ViewMode>('list');
+    const [selectedInstrument, setSelectedInstrument] = useState<Instrument | null>(null);
+
+    const filteredInstruments = isaData.filter(inst => filter === 'all' || inst.category === filter);
+
+    const openModal = (instrument: Instrument) => {
+        setSelectedInstrument(instrument);
+    };
+
+    const closeModal = () => {
+        setSelectedInstrument(null);
+    };
+
+    return (
+        <>
+            <div className="sidebar">
+                <div className="logo">ISA Tool</div>
+                <nav className="navigation">
+                    <a href="#" className={`nav-item ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>All</a>
+                    <a href="#" className={`nav-item ${filter === 'sensor' ? 'active' : ''}`} onClick={() => setFilter('sensor')}>Sensors</a>
+                    <a href="#" className={`nav-item ${filter === 'actuator' ? 'active' : ''}`} onClick={() => setFilter('actuator')}>Actuators</a>
+                    <a href="#" className={`nav-item ${filter === 'controller-indicator' ? 'active' : ''}`} onClick={() => setFilter('controller-indicator')}>Controllers & Indicators</a>
+                </nav>
+            </div>
+            <main className="main-content">
+                <header className="main-header">
+                    <h1 className="main-title">All Instruments</h1>
+                    <div className="view-switcher">
+                        <button className={`view-btn ${view === 'list' ? 'active' : ''}`} onClick={() => setView('list')} aria-label="List View">
+                           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" /></svg>
+                        </button>
+                        <button className={`view-btn ${view === 'grid' ? 'active' : ''}`} onClick={() => setView('grid')} aria-label="Grid View">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 8.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 8.25 20.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6A2.25 2.25 0 0 1 15.75 3.75h2.25A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25A2.25 2.25 0 0 1 13.5 8.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25h2.25a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" /></svg>
+                        </button>
+                    </div>
+                </header>
+                {view === 'grid' 
+                    ? <GridView instruments={filteredInstruments} onInstrumentClick={openModal} /> 
+                    : <ListView instruments={filteredInstruments} onInstrumentClick={openModal} />
+                }
+            </main>
+            {selectedInstrument && <InstrumentModal instrument={selectedInstrument} onClose={closeModal} />}
+        </>
+    );
+};
+
+const ListView = ({ instruments, onInstrumentClick }: { instruments: Instrument[], onInstrumentClick: (inst: Instrument) => void }) => (
+    <div className="list">
+        {instruments.map(inst => (
+            <div key={inst.id} className="list-item" tabIndex={0} onClick={() => onInstrumentClick(inst)} onKeyDown={(e: React.KeyboardEvent) => (e.key === 'Enter' || e.key === ' ') && onInstrumentClick(inst)}>
+                <div className="list-item-icon" dangerouslySetInnerHTML={{ __html: inst.icon }} />
+                <div className="list-item-code">{inst.code}</div>
+                <div className="list-item-details">
+                    <div className="list-item-title">{inst.name}</div>
+                    <div className="list-item-description">{inst.description}</div>
+                </div>
+            </div>
+        ))}
+    </div>
+);
+
+const GridView = ({ instruments, onInstrumentClick }: { instruments: Instrument[], onInstrumentClick: (inst: Instrument) => void }) => (
+    <div className="grid">
+        {instruments.map(inst => (
+            <div key={inst.id} className="card" tabIndex={0} onClick={() => onInstrumentClick(inst)} onKeyDown={(e: React.KeyboardEvent) => (e.key === 'Enter' || e.key === ' ') && onInstrumentClick(inst)}>
+                <div className="card-icon" dangerouslySetInnerHTML={{ __html: inst.icon }} />
+                <div className="card-content">
+                    <div className="card-code">{inst.code}</div>
+                    <h3 className="card-title">{inst.name}</h3>
+                    <p className="card-description">{inst.description}</p>
+                </div>
+            </div>
+        ))}
+    </div>
+);
+
+const InstrumentModal = ({ instrument, onClose }: { instrument: Instrument, onClose: () => void }) => {
+    const [activeTab, setActiveTab] = useState<ModalTab>('description');
+    const modalRef = useRef<HTMLDivElement>(null);
+    const closeButtonRef = useRef<HTMLButtonElement>(null);
+    const prevFocusedElement = useRef<HTMLElement | null>(null);
+
+    useEffect(() => {
+        prevFocusedElement.current = document.activeElement as HTMLElement;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                onClose();
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+        
+        // Focus management
+        closeButtonRef.current?.focus();
+
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+            prevFocusedElement.current?.focus();
+        };
+    }, [onClose]);
+    
+    return (
+        <div className="modal-container" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+            <div className="modal-overlay" onClick={onClose}></div>
+            <div className="modal-content" ref={modalRef}>
+                <header className="modal-header">
+                    <h2 id="modal-title">{instrument.name} ({instrument.code})</h2>
+                    <button className="modal-close-btn" onClick={onClose} ref={closeButtonRef} aria-label="Close modal">&times;</button>
+                </header>
+                <div className="modal-tabs">
+                    <button className={`modal-tab ${activeTab === 'description' ? 'active' : ''}`} onClick={() => setActiveTab('description')}>Description</button>
+                    <button className={`modal-tab ${activeTab === 'controller' ? 'active' : ''}`} onClick={() => setActiveTab('controller')}>Controller</button>
+                    <button className={`modal-tab ${activeTab === 'hmi' ? 'active' : ''}`} onClick={() => setActiveTab('hmi')}>HMI</button>
+                </div>
+                <div className="modal-body">
+                    <div className={`modal-tab-pane ${activeTab === 'description' ? 'active' : ''}`}>
+                        {parseDetailsContent(instrument.detailsContent)}
+                    </div>
+                    <div className={`modal-tab-pane ${activeTab === 'controller' ? 'active' : ''}`}>
+                        <pre><code>{instrument.controllerLogic}</code></pre>
+                    </div>
+                    <div className={`modal-tab-pane ${activeTab === 'hmi' ? 'active' : ''}`}>
+                         <div className="hmi-view" dangerouslySetInnerHTML={{ __html: instrument.hmiRepresentation }} />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+const container = document.getElementById('app');
+if (container) {
+    const root = createRoot(container);
+    root.render(<App />);
+}
