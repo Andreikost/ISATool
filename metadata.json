@@ -1,0 +1,5 @@
+{
+  "name": "ISA Tool",
+  "description": "A web application to visualize a complete reference of common sensors, actuators, controllers, and indicators defined by the ISA instrumentation standard.",
+  "requestFramePermissions": []
+}
